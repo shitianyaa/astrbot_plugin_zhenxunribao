@@ -170,7 +170,9 @@ class HolidayAPI(BaseAPI):
         previous_date = None
 
         for current_date in sorted(dates):
-            if previous_date is None or current_date > previous_date + timedelta(days=1):
+            if previous_date is None or current_date > previous_date + timedelta(
+                days=1
+            ):
                 start_dates.append(current_date)
             previous_date = current_date
 
