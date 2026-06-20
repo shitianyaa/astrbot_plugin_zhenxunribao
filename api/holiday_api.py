@@ -4,7 +4,7 @@
 """
 
 import aiohttp
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional
 
 from astrbot.api import logger
@@ -87,11 +87,10 @@ class HolidayAPI(BaseAPI):
                 return self._get_default_holidays()
 
             # 获取当前日期
-            today = date.today()
+            today = self._get_today()
 
             # 处理节假日数据
-            processed_holidays = []
-            seen_holidays = set()  # 用于去重连续假期的第一天
+            holiday_dates = {}
 
             for holiday in holidays_data:
                 if not isinstance(holiday, dict):
@@ -114,33 +113,19 @@ class HolidayAPI(BaseAPI):
                     logger.warning(f"日期解析失败: {date_str}, 错误: {e}")
                     continue
 
-                # 只保留未来的节假日（包括今天）
-                if holiday_date < today:
-                    continue
-
-                # 计算天数差
-                days_left = (holiday_date - today).days
-
                 # 获取节假日名称
                 name = holiday.get("name", "未知")
+                holiday_dates.setdefault(name, set()).add(holiday_date)
 
-                # 对于连续多天的假期，只取第一天（天数最少的）
-                # 如果名称已存在，比较天数，保留更近的
-                if name in seen_holidays:
-                    # 找到已存在的同名假期，比较天数
-                    for i, existing in enumerate(processed_holidays):
-                        if existing["name"] == name:
-                            if days_left < existing["days_left"]:
-                                processed_holidays[i] = {
-                                    "name": name,
-                                    "days_left": days_left,
-                                    "date": date_str,
-                                }
-                            break
-                else:
-                    seen_holidays.add(name)
+            processed_holidays = []
+            for name, dates in holiday_dates.items():
+                for start_date in self._iter_holiday_start_dates(dates):
+                    # 多天节假日按首日计算；首日已过则跳过整个假期块。
+                    if start_date < today:
+                        continue
+                    days_left = (start_date - today).days
                     processed_holidays.append(
-                        {"name": name, "days_left": days_left, "date": date_str}
+                        {"name": name, "days_left": days_left, "date": start_date}
                     )
 
             # 按天数排序，取最近的几个
@@ -174,6 +159,22 @@ class HolidayAPI(BaseAPI):
             {"name": "春节", "days_left": 25},
             {"name": "清明节", "days_left": 78},
         ]
+
+    def _get_today(self) -> date:
+        """返回当前日期，便于测试中固定日期。"""
+        return date.today()
+
+    def _iter_holiday_start_dates(self, dates) -> List[date]:
+        """按连续假期块返回每个假期块的首日。"""
+        start_dates = []
+        previous_date = None
+
+        for current_date in sorted(dates):
+            if previous_date is None or current_date > previous_date + timedelta(days=1):
+                start_dates.append(current_date)
+            previous_date = current_date
+
+        return start_dates
 
     async def get_moyu_list_async(self, max_count: int = 3) -> List[Dict]:
         """
