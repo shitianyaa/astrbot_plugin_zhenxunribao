@@ -718,10 +718,13 @@ html, body {
 
         return group_id_str
 
-    def _get_special_holiday_context(self, moyu_list: list):
-        """仅在节假日当天、前一天、前七天返回特殊播报上下文。"""
-        if not moyu_list:
-            return None
+    def _get_special_holiday_context(
+        self, moyu_list: list, holiday_context: dict | None = None
+    ):
+        """返回节日或假期特殊播报上下文。"""
+        today_context = None
+        day_before_context = None
+        week_before_context = None
 
         for holiday in moyu_list:
             if not isinstance(holiday, dict):
@@ -741,11 +744,31 @@ html, body {
                 continue
 
             if days_left == 7:
-                return {"name": name, "days_left": days_left, "type": "week_before"}
+                week_before_context = {
+                    "name": name,
+                    "days_left": days_left,
+                    "type": "week_before",
+                }
             if days_left == 1:
-                return {"name": name, "days_left": days_left, "type": "day_before"}
+                day_before_context = {
+                    "name": name,
+                    "days_left": days_left,
+                    "type": "day_before",
+                }
             if days_left == 0:
-                return {"name": name, "days_left": days_left, "type": "today"}
+                today_context = {"name": name, "days_left": days_left, "type": "today"}
+
+        if today_context:
+            return today_context
+        if (
+            isinstance(holiday_context, dict)
+            and holiday_context.get("type") == "holiday_last_day"
+        ):
+            return holiday_context
+        if day_before_context:
+            return day_before_context
+        if week_before_context:
+            return week_before_context
 
         return None
 
@@ -759,19 +782,28 @@ html, body {
 
             # 获取节假日信息
             moyu_list = []
+            holiday_context = None
             try:
-                holiday_data = await self.holiday_api.get_moyu_list_async(max_count=1)
-                if holiday_data and len(holiday_data) > 0:
+                holiday_api_data = await self.holiday_api.get_holidays_async()
+                holiday_data = self.holiday_api.parse_holidays(
+                    holiday_api_data, max_count=1
+                )
+                if holiday_data:
                     moyu_list = holiday_data
+                holiday_context = self.holiday_api.parse_holiday_last_day_context(
+                    holiday_api_data
+                )
             except Exception:
                 pass
 
             # 检查是否启用 AI 生成问候语
             if not self.config.get("enable_ai_greeting", False):
-                return self._get_default_greeting(hour, moyu_list)
+                return self._get_default_greeting(hour, moyu_list, holiday_context)
 
             # 构建 prompt
-            special_holiday = self._get_special_holiday_context(moyu_list)
+            special_holiday = self._get_special_holiday_context(
+                moyu_list, holiday_context
+            )
             prompt_parts = [
                 f"现在是{date_info['date_str']} {date_info['week_cn']}",
                 f"时间是{hour}点",
@@ -785,7 +817,7 @@ html, body {
 
             prompt_prefix = f"{', '.join(prompt_parts)}。"
             if special_holiday:
-                holiday_name = special_holiday["name"]
+                holiday_name = special_holiday.get("name")
                 holiday_type = special_holiday["type"]
                 if holiday_type == "week_before":
                     prompt = (
@@ -798,6 +830,16 @@ html, body {
                         f"{prompt_prefix}明天就是{holiday_name}。"
                         f"请生成一句简短（15字以内）、温馨、有临近节日氛围的早安日报问候语。"
                         f"要求：1. 结合这个节日节点 2. 亲切自然 3. 带上真寻的口吻 4. 只返回问候语文本，不要其他内容"
+                    )
+                elif holiday_type == "holiday_last_day":
+                    if holiday_name:
+                        holiday_text = f"今天是{holiday_name}假期最后一天。"
+                    else:
+                        holiday_text = "今天是假期最后一天。"
+                    prompt = (
+                        f"{prompt_prefix}{holiday_text}"
+                        f"请生成一句简短（15字以内）、温馨自然、适合假期收尾的早安日报问候语。"
+                        f"要求：1. 结合假期最后一天 2. 亲切自然 3. 带上真寻的口吻 4. 只返回问候语文本，不要其他内容"
                     )
                 else:
                     prompt = (
@@ -849,13 +891,15 @@ html, body {
                 logger.debug(f"AI 生成问候语失败: {e}")
 
             # 回退到默认问候语
-            return self._get_default_greeting(hour, moyu_list)
+            return self._get_default_greeting(hour, moyu_list, holiday_context)
 
         except Exception as e:
             logger.warning(f"生成问候语出错: {e}")
             return "📰 真寻日报来啦~\n"
 
-    def _get_default_greeting(self, hour: int, moyu_list: list) -> str:
+    def _get_default_greeting(
+        self, hour: int, moyu_list: list, holiday_context: dict | None = None
+    ) -> str:
         """获取默认问候语（无 AI 时使用）"""
         # 根据时间段选择问候语
         greetings = {
@@ -892,10 +936,15 @@ html, body {
             period_greetings = greetings["evening"]
 
         # 仅在节假日当天、前一天、前七天添加节日问候
-        special_holiday = self._get_special_holiday_context(moyu_list)
+        special_holiday = self._get_special_holiday_context(moyu_list, holiday_context)
         if special_holiday:
-            holiday_name = special_holiday["name"]
+            holiday_name = special_holiday.get("name")
+            holiday_type = special_holiday["type"]
             days_left = special_holiday["days_left"]
+            if holiday_type == "holiday_last_day":
+                if holiday_name:
+                    return f"📰 {holiday_name}假期最后一天啦！日报送上~\n"
+                return "📰 今天是假期最后一天啦！日报送上~\n"
             if days_left == 0:
                 return f"📰 {holiday_name}快乐！日报送上~\n"
             if days_left == 1:

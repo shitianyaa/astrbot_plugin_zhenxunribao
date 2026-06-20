@@ -93,29 +93,14 @@ class HolidayAPI(BaseAPI):
             holiday_dates = {}
 
             for holiday in holidays_data:
-                if not isinstance(holiday, dict):
+                off_day = self._parse_off_day(holiday)
+                if off_day is None:
                     continue
 
-                # 只处理实际放假的日期
-                is_off_day = holiday.get("is_off_day")
-                if is_off_day != 1:
+                name = off_day["name"]
+                if not self._is_displayable_holiday_name(name):
                     continue
-
-                # 获取日期
-                date_str = holiday.get("date")
-                if not date_str:
-                    continue
-
-                # 解析日期
-                try:
-                    holiday_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                except ValueError as e:
-                    logger.warning(f"日期解析失败: {date_str}, 错误: {e}")
-                    continue
-
-                # 获取节假日名称
-                name = holiday.get("name", "未知")
-                holiday_dates.setdefault(name, set()).add(holiday_date)
+                holiday_dates.setdefault(name, set()).add(off_day["date"])
 
             processed_holidays = []
             for name, dates in holiday_dates.items():
@@ -147,6 +132,43 @@ class HolidayAPI(BaseAPI):
             logger.error(f"解析节假日数据时出错: {e}", exc_info=True)
             return self._get_default_holidays()
 
+    def parse_holiday_last_day_context(
+        self, api_data: Optional[Dict]
+    ) -> Optional[Dict]:
+        """解析今天是否为多天假期最后一天，用于问候语隐藏上下文。"""
+        if not api_data:
+            return None
+
+        try:
+            holidays_data = api_data.get("data", [])
+            if not isinstance(holidays_data, list) or len(holidays_data) == 0:
+                return None
+
+            today = self._get_today()
+            off_days = []
+            for holiday in holidays_data:
+                off_day = self._parse_off_day(holiday)
+                if off_day is not None:
+                    off_days.append(off_day)
+
+            for holiday_block in self._iter_holiday_blocks(off_days):
+                if len(holiday_block) <= 1:
+                    continue
+                if holiday_block[-1]["date"] != today:
+                    continue
+                if not self._is_holiday_block_contextual(holiday_block):
+                    continue
+                return {
+                    "name": self._get_display_name_from_holiday_block(holiday_block),
+                    "days_left": 0,
+                    "type": "holiday_last_day",
+                }
+
+        except Exception as e:
+            logger.error(f"解析假期最后一天上下文时出错: {e}", exc_info=True)
+
+        return None
+
     def _get_default_holidays(self) -> List[Dict]:
         """
         返回默认的节假日数据（当 API 失败时使用）
@@ -163,6 +185,77 @@ class HolidayAPI(BaseAPI):
     def _get_today(self) -> date:
         """返回当前日期，便于测试中固定日期。"""
         return date.today()
+
+    def _parse_off_day(self, holiday: Dict) -> Optional[Dict]:
+        """从 API 单条数据中解析实际放假日期。"""
+        if not isinstance(holiday, dict):
+            return None
+
+        is_off_day = holiday.get("is_off_day")
+        if is_off_day != 1:
+            return None
+
+        date_str = holiday.get("date")
+        if not date_str:
+            return None
+
+        try:
+            holiday_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError as e:
+            logger.warning(f"日期解析失败: {date_str}, 错误: {e}")
+            return None
+
+        name = str(holiday.get("name", "未知")).strip() or "未知"
+        return {"name": name, "date": holiday_date}
+
+    def _is_displayable_holiday_name(self, name: str) -> bool:
+        """过滤假期段标签，只展示真正的节日名。"""
+        return not str(name).strip().endswith("假期")
+
+    def _is_holiday_block_contextual(self, holiday_block: List[Dict]) -> bool:
+        """判断连续放假块是否应该触发假期最后一天问候。"""
+        for day_info in holiday_block:
+            for name in day_info["names"]:
+                if name in {"周末", "未知"}:
+                    continue
+                if name.endswith("假期") or self._is_displayable_holiday_name(name):
+                    return True
+        return False
+
+    def _get_display_name_from_holiday_block(self, holiday_block: List[Dict]):
+        """从假期块中取真实节日名；只有假期标签时返回 None。"""
+        for day_info in holiday_block:
+            for name in day_info["names"]:
+                if self._is_displayable_holiday_name(name) and name != "周末":
+                    return name
+        return None
+
+    def _iter_holiday_blocks(self, off_days: List[Dict]) -> List[List[Dict]]:
+        """按连续日期聚合实际放假日期。"""
+        names_by_date = {}
+        for off_day in off_days:
+            names_by_date.setdefault(off_day["date"], set()).add(off_day["name"])
+
+        holiday_blocks = []
+        current_block = []
+        previous_date = None
+
+        for current_date in sorted(names_by_date):
+            if previous_date is None or current_date > previous_date + timedelta(
+                days=1
+            ):
+                if current_block:
+                    holiday_blocks.append(current_block)
+                current_block = []
+            current_block.append(
+                {"date": current_date, "names": sorted(names_by_date[current_date])}
+            )
+            previous_date = current_date
+
+        if current_block:
+            holiday_blocks.append(current_block)
+
+        return holiday_blocks
 
     def _iter_holiday_start_dates(self, dates) -> List[date]:
         """按连续假期块返回每个假期块的首日。"""
