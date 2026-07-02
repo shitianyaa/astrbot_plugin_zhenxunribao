@@ -160,7 +160,9 @@ class BGMAPI(BaseAPI):
                         title = name_cn if name_cn else name_jp
 
                         # 获取图片（使用 medium 尺寸）
-                        images = item.get("images", {})
+                        images = item.get("images") or {}
+                        if not isinstance(images, dict):
+                            images = {}
                         image_url = images.get("medium", "") or images.get("common", "")
 
                         if title and image_url:
